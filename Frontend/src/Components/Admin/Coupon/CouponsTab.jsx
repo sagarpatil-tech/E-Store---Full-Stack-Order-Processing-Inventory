@@ -1,0 +1,487 @@
+import { useEffect, useMemo, useState } from "react";
+import { useAdmin } from "../../../store/Hooks/Admin/useAdmin.js";
+import CouponFormModal from "./CouponFormModal.jsx";
+
+const CouponsTab = () => {
+  const {
+    coupons,
+    ui,
+    fetchCoupons,
+    clearCouponsError,
+    createCoupon,
+    editCoupon,
+    deleteCoupon,
+  } = useAdmin();
+  const [currentPage, setCurrentPage] = useState(1);
+  const [isCreating, setIsCreating] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [deletingId, setDeletingId] = useState(null);
+  const PAGE_SIZE = 10;
+
+  // Filters
+  const [searchCode, setSearchCode] = useState("");
+  const [filterType, setFilterType] = useState("all"); // percentage | fixed | free_shipping
+  const [filterStatus, setFilterStatus] = useState("all"); // active | inactive | scheduled | expired
+
+  useEffect(() => {
+    // When filtering, we paginate client-side; skip server fetch tied to currentPage
+    if (
+      (searchCode || "").trim() !== "" ||
+      filterType !== "all" ||
+      filterStatus !== "all"
+    )
+      return;
+    fetchCoupons(currentPage, 10);
+  }, [fetchCoupons, currentPage, searchCode, filterType, filterStatus]);
+
+  // Derived filtered list
+  const filteredCoupons = useMemo(() => {
+    const list = coupons.list || [];
+    const term = (searchCode || "").trim().toLowerCase();
+    const now = new Date();
+
+    return list.filter((c) => {
+      // code search
+      if (term && !(c.code || "").toLowerCase().includes(term)) return false;
+
+      // type filter
+      if (filterType !== "all" && c.discountType !== filterType) return false;
+
+      // status filter (computed like getStatusBadge)
+      if (filterStatus !== "all") {
+        const isActive = c.isActive !== false; // default true
+        const validFrom = c.validFrom ? new Date(c.validFrom) : null;
+        const validTo = c.validTo ? new Date(c.validTo) : null;
+        let status = "active";
+        if (!isActive) status = "inactive";
+        else if (validFrom && now < validFrom) status = "scheduled";
+        else if (validTo && now > validTo) status = "expired";
+        else status = "active";
+        if (status !== filterStatus) return false;
+      }
+
+      return true;
+    });
+  }, [coupons.list, searchCode, filterType, filterStatus]);
+
+  // Reset to first page when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchCode, filterType, filterStatus]);
+
+  // Determine if we are filtering (code, type, or status)
+  const isFiltering =
+    (searchCode || "").trim() !== "" ||
+    filterType !== "all" ||
+    filterStatus !== "all";
+
+  // When entering filter mode, load a larger dataset once to filter across more items
+  const [fetchedAllForFilter, setFetchedAllForFilter] = useState(false);
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      if (isFiltering) {
+        if (!fetchedAllForFilter) {
+          await fetchCoupons(1, 1000);
+          if (!active) return;
+          setFetchedAllForFilter(true);
+        }
+      } else {
+        setFetchedAllForFilter(false);
+        // Non-filtering mode respects server-side pagination via existing effect tied to currentPage
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [isFiltering, fetchedAllForFilter, fetchCoupons]);
+
+  // Paged slice of filtered list
+  const pagedCoupons = useMemo(() => {
+    const start = (currentPage - 1) * PAGE_SIZE;
+    const end = currentPage * PAGE_SIZE;
+    return filteredCoupons.slice(start, end);
+  }, [filteredCoupons, currentPage]);
+
+  // Effective pagination metrics: server when not filtering, client-side when filtering
+  const clientTotalPages = Math.max(
+    1,
+    Math.ceil(filteredCoupons.length / PAGE_SIZE)
+  );
+  const effectiveTotalPages = isFiltering
+    ? clientTotalPages
+    : coupons.totalPages || 1;
+
+  // Rows to render: filtered+paged in filter mode, otherwise server list
+  const rows = isFiltering ? pagedCoupons : coupons.list || [];
+
+  const handleNextPage = () => {
+    if (currentPage < effectiveTotalPages) setCurrentPage((p) => p + 1);
+  };
+  const handlePrevPage = () => {
+    if (currentPage > 1) setCurrentPage((p) => p - 1);
+  };
+  // Scroll to top on page change
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  }, [currentPage]);
+  const handleCreateCoupon = () => {
+    setIsCreating(true);
+  };
+  const handleEditCoupon = (c) => setEditing(c);
+  const handleDeleteCoupon = async (c) => {
+    if (!window.confirm(`Delete coupon ${c.code}? This is a soft delete.`))
+      return;
+    setDeletingId(c._id);
+    try {
+      await deleteCoupon(c._id);
+      // Refresh dataset according to mode
+      if (
+        (searchCode || "").trim() !== "" ||
+        filterType !== "all" ||
+        filterStatus !== "all"
+      ) {
+        await fetchCoupons(1, 1000);
+      } else {
+        await fetchCoupons(currentPage, 10);
+      }
+    } catch (e) {
+      console.error(e);
+      alert(e.message || "Failed to delete coupon");
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const formatDate = (d) => new Date(d).toLocaleDateString();
+  const getDiscountDisplay = (c) =>
+    c.discountType === "percentage"
+      ? `${c.maxDiscount}%`
+      : c.discountType === "fixed"
+      ? `₹${c.maxDiscount}`
+      : c.discountType === "free_shipping"
+      ? "Free Shipping"
+      : "N/A";
+  const getStatusBadge = (c) => {
+    const now = new Date();
+    const validFrom = new Date(c.validFrom);
+    const validTo = new Date(c.validTo);
+    if (!c.isActive)
+      return (
+        <span className="px-2 py-1 bg-gray-200 text-gray-800 rounded-full text-xs">
+          Inactive
+        </span>
+      );
+    if (now < validFrom)
+      return (
+        <span className="px-2 py-1 bg-yellow-200 text-yellow-800 rounded-full text-xs">
+          Scheduled
+        </span>
+      );
+    if (now > validTo)
+      return (
+        <span className="px-2 py-1 bg-red-200 text-red-800 rounded-full text-xs">
+          Expired
+        </span>
+      );
+    return (
+      <span className="px-2 py-1 bg-green-200 text-green-800 rounded-full text-xs">
+        Active
+      </span>
+    );
+  };
+
+  if (ui.isLoading.coupons && coupons.list.length === 0) {
+    return (
+      <div className="p-6">
+        <div className="flex justify-between items-center mb-6">
+          <h2 className="text-2xl font-bold text-gray-900">
+            Coupon Management
+          </h2>
+        </div>
+        <div className="animate-pulse space-y-4">
+          {[...Array(5)].map((_, i) => (
+            <div key={i} className="bg-gray-200 h-20 rounded-lg"></div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-6">
+      <div className="flex justify-between items-center mb-6">
+        <div>
+          <h2 className="text-2xl font-bold text-gray-900">
+            Coupon Management
+          </h2>
+          <p className="text-gray-600 mt-1">
+            Create and manage discount coupons and promotions
+          </p>
+        </div>
+        <button
+          onClick={handleCreateCoupon}
+          className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center space-x-2"
+        >
+          <span>➕</span>
+          <span>Create Coupon</span>
+        </button>
+      </div>
+
+      {ui.errors.coupons && (
+        <div className="mb-4 p-4 bg-red-50 border-l-4 border-red-400 text-red-700">
+          <div className="flex justify-between items-center">
+            <p>{ui.errors.coupons}</p>
+            <button
+              onClick={clearCouponsError}
+              className="text-red-500 hover:text-red-700"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="bg-white rounded-lg shadow overflow-hidden">
+        {/* Filters */}
+        <div className="px-4 pt-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
+            <input
+              type="text"
+              value={searchCode}
+              onChange={(e) => setSearchCode(e.target.value)}
+              placeholder="Search by coupon code"
+              className="w-full px-3 py-2 border border-gray-300 rounded-md"
+            />
+            <select
+              value={filterType}
+              onChange={(e) => setFilterType(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md"
+            >
+              <option value="all">All Types</option>
+              <option value="percentage">Percentage</option>
+              <option value="fixed">Fixed</option>
+              <option value="free_shipping">Free Shipping</option>
+            </select>
+            <select
+              value={filterStatus}
+              onChange={(e) => setFilterStatus(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md"
+            >
+              <option value="all">All Status</option>
+              <option value="active">Active</option>
+              <option value="inactive">Inactive</option>
+              <option value="scheduled">Scheduled</option>
+              <option value="expired">Expired</option>
+            </select>
+            <button
+              onClick={() => {
+                setSearchCode("");
+                setFilterType("all");
+                setFilterStatus("all");
+              }}
+              className="w-full px-3 py-2 border rounded-md hover:bg-gray-50"
+            >
+              Clear
+            </button>
+          </div>
+          <div className="text-xs text-gray-500 mt-2">
+            Showing {filteredCoupons.length} results
+          </div>
+        </div>
+        {coupons.list.length === 0 ? (
+          <div className="p-8 text-center">
+            <div className="text-gray-400 text-4xl mb-4">🎟️</div>
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">
+              No Coupons Found
+            </h3>
+            <p className="text-gray-600 mb-4">
+              Get started by creating your first discount coupon.
+            </p>
+            <button
+              onClick={handleCreateCoupon}
+              className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg"
+            >
+              Create Your First Coupon
+            </button>
+          </div>
+        ) : (
+          <>
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Code & Name
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Discount
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Usage
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Valid Period
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Status
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Actions
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {rows.map((coupon) => (
+                    <tr key={coupon._id} className="hover:bg-gray-50">
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div>
+                          <div className="text-sm font-medium text-gray-900">
+                            {coupon.code}
+                          </div>
+                          <div className="text-sm text-gray-500">
+                            {coupon.name}
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm font-medium text-gray-900">
+                          {getDiscountDisplay(coupon)}
+                        </div>
+                        <div className="text-sm text-gray-500">
+                          Min: ₹{coupon.minOrderValue || 0}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm text-gray-900">
+                          {coupon.usageCount || 0} / {coupon.usageLimit || "∞"}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                        <div>{formatDate(coupon.validFrom)}</div>
+                        <div className="text-gray-500">
+                          to {formatDate(coupon.validTo)}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        {getStatusBadge(coupon)}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                        <div className="flex space-x-2">
+                          <button
+                            className="text-blue-600 hover:text-blue-900"
+                            onClick={() => handleEditCoupon(coupon)}
+                          >
+                            Edit
+                          </button>
+                          <button
+                            className={`text-red-600 hover:text-red-900 ${
+                              coupon.isActive === false
+                                ? "opacity-50 cursor-not-allowed"
+                                : ""
+                            }`}
+                            disabled={
+                              deletingId === coupon._id ||
+                              coupon.isActive === false
+                            }
+                            onClick={() => handleDeleteCoupon(coupon)}
+                          >
+                            {deletingId === coupon._id ? "Deleting…" : "Delete"}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {effectiveTotalPages > 1 && (
+              <div className="bg-white px-4 py-3 border-t border-gray-200 sm:px-6">
+                <div className="flex justify-between items-center">
+                  <div className="text-sm text-gray-700">
+                    Showing page {currentPage} of {effectiveTotalPages}
+                    {isFiltering
+                      ? ` (${filteredCoupons.length} filtered)`
+                      : ` (${coupons.total} total)`}
+                  </div>
+                  <div className="flex space-x-2">
+                    <button
+                      onClick={handlePrevPage}
+                      disabled={currentPage === 1}
+                      className="px-3 py-1 border border-gray-300 rounded-md text-sm disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+                    >
+                      Previous
+                    </button>
+                    <button
+                      onClick={handleNextPage}
+                      disabled={currentPage === effectiveTotalPages}
+                      className="px-3 py-1 border border-gray-300 rounded-md text-sm disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {ui.isLoading.coupons && coupons.list.length > 0 && (
+        <div className="absolute inset-0 bg-white bg-opacity-75 flex items-center justify-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+        </div>
+      )}
+
+      {/* Create Modal - render outside pagination condition so it always mounts */}
+      {isCreating && (
+        <CouponFormModal
+          open={isCreating}
+          onClose={() => setIsCreating(false)}
+          onSubmit={async (payload) => {
+            await createCoupon(payload);
+            // After create, fetch a large list if filtering is active
+            if (
+              (searchCode || "").trim() !== "" ||
+              filterType !== "all" ||
+              filterStatus !== "all"
+            ) {
+              await fetchCoupons(1, 1000);
+            } else {
+              await fetchCoupons(1, 10);
+            }
+            setCurrentPage(1);
+          }}
+        />
+      )}
+
+      {/* Edit Modal - always mounted at root level */}
+      {!!editing && (
+        <CouponFormModal
+          open={!!editing}
+          initial={editing || {}}
+          onClose={() => setEditing(null)}
+          onSubmit={async (payload) => {
+            const { _id, code, ...rest } = { ...editing, ...payload };
+            await editCoupon(_id, rest);
+            if (
+              (searchCode || "").trim() !== "" ||
+              filterType !== "all" ||
+              filterStatus !== "all"
+            ) {
+              await fetchCoupons(1, 1000);
+              setCurrentPage(1);
+            } else {
+              await fetchCoupons(currentPage, 10);
+            }
+          }}
+        />
+      )}
+    </div>
+  );
+};
+
+export default CouponsTab;
